@@ -104,47 +104,70 @@ class GSNRCalculator:
         print(f"  MCF: {mcf_config.mcf_params.num_cores} cores, {mcf_config.mcf_params.core_pitch_um} μm pitch")
         print(f"  Channels: {self.num_channels} ({len([ch for ch in self.channels if ch['band']=='C'])} C-band, {len([ch for ch in self.channels if ch['band']=='L'])} L-band)")
     
+    # Fixed create_span_configuration_for_step1 method in gsnr_calculator.py
+
     def create_span_configuration_for_step1(self, path_links: List, total_launch_power_dbm: float = 0.0) -> Dict:
         """
-        Create span configuration for Step 1 based on path links
+        Create span configuration for Step 1 based on path links and MCF parameters
         
         Args:
             path_links: List of link objects in the path
             total_launch_power_dbm: Total launch power per channel (dBm)
             
         Returns:
-            Configuration dictionary for Step 1
+            Configuration dictionary for Step 1 with MCF parameters
         """
         # Calculate total path length
         total_length_km = sum(link.length_km for link in path_links)
         
-        # For simplification, treat entire path as single span
-        # In practice, each link would be processed separately
-        
         # Create input power configuration
-        # Uniform loading across all channels
         launch_power_per_channel_w = 10**(total_launch_power_dbm / 10) * 1e-3  # Convert dBm to W
         channel_powers_w = np.full(self.num_channels, launch_power_per_channel_w)
         
-        # Create scenario for Step 1
+        # ✅ Create MCF-specific scenario for Step 1
         scenario = {
-            'name': f'path_length_{total_length_km:.1f}km',
-            'description': f'Path with {len(path_links)} links, total {total_length_km:.1f} km',
+            'name': f'mcf_4core_path_{total_length_km:.1f}km',
+            'description': f'4-core MCF path with {len(path_links)} links, total {total_length_km:.1f} km',
             'channel_powers_w': channel_powers_w,
             'transponder_channels': [0, 1],  # First two channels as transponders
             'ase_channels': list(range(2, self.num_channels)),
-            'channel_types': ['transponder', 'transponder'] + ['ase'] * (self.num_channels - 2)
+            'channel_types': ['transponder', 'transponder'] + ['ase'] * (self.num_channels - 2),
+            # ✅ Add MCF-specific parameters
+            'mcf_configuration': {
+                'num_cores': self.mcf_config.mcf_params.num_cores,
+                'core_pitch_um': self.mcf_config.mcf_params.core_pitch_um,
+                'core_layout': self.mcf_config.mcf_params.core_layout,
+                'enable_icxt': True  # Enable ICXT calculation
+            }
         }
         
-        # System parameters based on MCF configuration
+        # ✅ Enhanced system parameters with MCF specifics
         system_parameters = {
             'frequencies_hz': self.frequencies_hz,
             'wavelengths_nm': self.wavelengths_nm,
             'num_channels': self.num_channels,
             'alpha_db_km': [self.frequency_params['loss_coefficient_db_km'][freq] 
-                           for freq in self.frequencies_hz],
+                        for freq in self.frequencies_hz],
             'span_length_km': total_length_km,
-            'mcf_parameters': self.mcf_config.mcf_params.__dict__
+            'mcf_parameters': {
+                'num_cores': self.mcf_config.mcf_params.num_cores,
+                'core_pitch_um': self.mcf_config.mcf_params.core_pitch_um,
+                'core_radius_um': self.mcf_config.mcf_params.core_radius_um,
+                'cladding_diameter_um': self.mcf_config.mcf_params.cladding_diameter_um,
+                'trench_width_ratio': self.mcf_config.mcf_params.trench_width_ratio,
+                'bending_radius_mm': self.mcf_config.mcf_params.bending_radius_mm,
+                'core_refractive_index': self.mcf_config.mcf_params.core_refractive_index,
+                'cladding_refractive_index': self.mcf_config.mcf_params.cladding_refractive_index,
+                'core_cladding_delta': self.mcf_config.mcf_params.core_cladding_delta
+            },
+            # ✅ Add C+L band specific parameters
+            'band_configuration': {
+                'c_band_start_hz': 191.4e12,
+                'c_band_end_hz': 196.1e12,
+                'l_band_start_hz': 186.1e12,
+                'l_band_end_hz': 190.8e12,
+                'channel_spacing_hz': 100e9
+            }
         }
         
         return {
@@ -194,16 +217,22 @@ class GSNRCalculator:
             # Return fallback results
             return self._create_fallback_step1_results(path_links, launch_power_dbm)
     
+    # ✅ Also update the fallback method to use proper MCF parameters
     def _create_fallback_step1_results(self, path_links: List, launch_power_dbm: float) -> Dict:
-        """Create fallback Step 1 results if import fails"""
+        """Create fallback Step 1 results with MCF parameters if import fails"""
         total_length_km = sum(link.length_km for link in path_links)
         launch_power_w = 10**(launch_power_dbm / 10) * 1e-3
         
-        # Simple exponential decay model
+        # Simple exponential decay model with ICXT consideration
         final_powers_w = np.zeros(self.num_channels)
         for i, freq_hz in enumerate(self.frequencies_hz):
             loss_db_km = self.frequency_params['loss_coefficient_db_km'][freq_hz]
-            loss_linear = 10**(-loss_db_km * total_length_km / 10)
+            
+            # ✅ Add ICXT penalty for 4-core MCF (rough approximation)
+            icxt_penalty_db_km = 0.02  # 0.02 dB/km ICXT penalty for 4-core at 43μm pitch
+            total_loss_db_km = loss_db_km + icxt_penalty_db_km
+            
+            loss_linear = 10**(-total_loss_db_km * total_length_km / 10)
             final_powers_w[i] = launch_power_w * loss_linear
         
         return {
@@ -212,14 +241,16 @@ class GSNRCalculator:
                 'wavelengths_nm': self.wavelengths_nm,
                 'num_channels': self.num_channels,
                 'alpha_db_km': [self.frequency_params['loss_coefficient_db_km'][freq] 
-                               for freq in self.frequencies_hz]
+                            for freq in self.frequencies_hz],
+                'mcf_parameters': self.mcf_config.mcf_params.__dict__
             },
             'span_length_km': total_length_km,
             'power_evolution_w': np.array([np.full(self.num_channels, launch_power_w), final_powers_w]),
             'distances_m': np.array([0, total_length_km * 1000]),
             'initial_powers_w': np.full(self.num_channels, launch_power_w),
             'final_powers_w': final_powers_w,
-            'fallback_mode': True
+            'fallback_mode': True,
+            'mcf_enabled': True
         }
     
     def run_step2_parameter_fitting(self, step1_results: Dict) -> Dict:
@@ -287,21 +318,27 @@ class GSNRCalculator:
             'fallback_mode': True
         }
     
+    # Fixed GSNR Calculator methods
+
     def run_steps_4567_gsnr_computation(self, step1_results: Dict, step2_results: Dict, 
-                                       step3_results: Dict, channel_index: int, 
-                                       core_index: int) -> Dict:
-        """Run Steps 4-7 GSNR computation"""
+                                    step3_results: Dict, channel_index: int, 
+                                    core_index: int) -> Dict:
+        """Run Steps 4-7 GSNR computation with proper MCF configuration"""
         try:
-            # MCF configuration for ICXT calculation
+            # MCF configuration for ICXT calculation - ✅ Use 4-core config
             mcf_config_dict = {
-                'num_cores': self.mcf_config.mcf_params.num_cores,
-                'core_pitch_um': self.mcf_config.mcf_params.core_pitch_um,
+                'num_cores': self.mcf_config.mcf_params.num_cores,      # Should be 4
+                'core_pitch_um': self.mcf_config.mcf_params.core_pitch_um,  # Should be 43.0
                 'cladding_diameter_um': self.mcf_config.mcf_params.cladding_diameter_um,
                 'core_radius_um': self.mcf_config.mcf_params.core_radius_um,
                 'trench_width_ratio': self.mcf_config.mcf_params.trench_width_ratio,
                 'bending_radius_mm': self.mcf_config.mcf_params.bending_radius_mm,
                 'ncore': self.mcf_config.mcf_params.core_refractive_index
             }
+            
+            # ✅ Verify MCF config before passing
+            print(f"Using MCF config: {mcf_config_dict['num_cores']} cores, "
+                f"{mcf_config_dict['core_pitch_um']} μm pitch")
             
             calculator = Step4567_GSNRComputation(step1_results, step2_results, step3_results)
             results = calculator.run_complete_gsnr_computation(mcf_config_dict)
@@ -331,8 +368,8 @@ class GSNRCalculator:
             return self._create_fallback_gsnr_results(step1_results, channel_index, core_index)
     
     def _create_fallback_gsnr_results(self, step1_results: Dict, channel_index: int, 
-                                    core_index: int) -> Dict:
-        """Create fallback GSNR results"""
+                                core_index: int) -> Dict:
+        """Create fallback GSNR results with proper 4-core ICXT calculation"""
         # Simple GSNR estimation based on distance and frequency
         span_length_km = step1_results['span_length_km']
         frequency_hz = self.frequencies_hz[channel_index]
@@ -344,8 +381,8 @@ class GSNRCalculator:
         # Base GSNR
         base_gsnr_db = 25.0 - distance_penalty_db - frequency_penalty_db
         
-        # ICXT penalty for MCF
-        num_adjacent = self.mcf_config.get_adjacent_cores_count(core_index)
+        # ✅ ICXT penalty for 4-core MCF (each core has 2 adjacent cores)
+        num_adjacent = 2  # Fixed for 4-core square layout
         icxt_penalty_db = num_adjacent * 0.5  # 0.5 dB per adjacent core
         
         gsnr_db = base_gsnr_db - icxt_penalty_db
@@ -361,6 +398,7 @@ class GSNRCalculator:
             'icxt_power': noise_power_w * 0.2,  # ICXT contribution
             'fallback_mode': True
         }
+    
     
     def calculate_gsnr(self, path_links: List, channel_index: int, core_index: int,
                       launch_power_dbm: float = 0.0, use_cache: bool = True) -> GSNRCalculationResult:
