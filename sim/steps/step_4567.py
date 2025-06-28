@@ -283,13 +283,13 @@ class Step4567_GSNRComputation:
         if mcf_config is None:
             # Default 7-core MCF configuration
             mcf_config = {
-                'num_cores': 7,
-                'core_pitch_um': 51.0,
-                'cladding_diameter_um': 187.5,
-                'core_radius_um': 4.5,
-                'trench_width_ratio': 1.5,
-                'bending_radius_mm': 144,
-                'ncore': 1.44
+                'num_cores': 4,                    # ✅ Correct for 4-core
+                'core_pitch_um': 43.0,            # ✅ Matches config.py
+                'cladding_diameter_um': 125.0,    # ✅ Standard diameter
+                'core_radius_um': 4.5,            # ✅ Matches config.py
+                'trench_width_ratio': 1.5,        # ✅ Matches config.py
+                'bending_radius_mm': 144,         # ✅ Matches config.py
+                'ncore': 1.4504                   # ✅ Matches config.py
             }
         
         num_cores = mcf_config['num_cores']
@@ -342,14 +342,14 @@ class Step4567_GSNRComputation:
                 if final_powers_w[ch] <= 0:
                     continue
                 
-                # Determine number of adjacent cores (depends on core layout)
-                if num_cores == 7:  # Hexagonal layout
+                # Determine number of adjacent cores for 4-core square layout
+                if num_cores == 4:  # Square layout (our case)
+                    NAC = 2  # Each core has exactly 2 adjacent cores
+                elif num_cores == 7:  # Hexagonal layout
                     if core == 0:  # Center core
                         NAC = 6
                     else:  # Outer cores
                         NAC = 3
-                elif num_cores == 4:  # Square layout
-                    NAC = 2
                 elif num_cores == 13:  # Larger hexagonal
                     if core == 0:
                         NAC = 6

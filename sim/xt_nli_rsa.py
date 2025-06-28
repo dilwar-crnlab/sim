@@ -13,6 +13,17 @@ from enum import Enum
 from dataclasses import dataclass
 import time
 
+
+# Fixed imports and ResourceAllocation creation in xt_nli_rsa.py
+
+# At the top of the file, add proper imports
+import sys
+import os
+# Add the parent directory to path for relative imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from connection_manager import ResourceAllocation, ModulationFormat
+
 class SpectrumAllocationMethod(Enum):
     """Spectrum Allocation Methods from the paper"""
     CSB = "Core-Spectrum-Band"  # Core-Spectrum-Band: prioritize cores over bands
@@ -294,21 +305,13 @@ class XT_NLI_A_RSA_Algorithm:
                     )
                     
                     if success:
-                        # Update connection with allocation results
-                        from mcf_eon_simulator.core.connection_manager import ResourceAllocation, ModulationFormat
-                        
-                        # Find modulation format enum
-                        mod_format = None
-                        for mf in ModulationFormat:
-                            if mf.format_name == resource.gsnr_result.supported_modulation:
-                                mod_format = mf
-                                break
-                        
-                        if mod_format is None:
-                            mod_format = ModulationFormat.PM_BPSK  # Fallback
+                        #  Fixed ResourceAllocation creation
+                        mod_format = self._get_modulation_format_enum(
+                            resource.gsnr_result.supported_modulation
+                        )
                         
                         resource_allocation = ResourceAllocation(
-                            link_id=path_links[0],  # Representative link
+                            link_id=path_links[0],
                             core_index=resource.core_index,
                             channel_index=resource.channel_index,
                             modulation_format=mod_format,
@@ -316,13 +319,8 @@ class XT_NLI_A_RSA_Algorithm:
                             gsnr_db=resource.gsnr_result.gsnr_db
                         )
                         
-                        # Calculate path through nodes
-                        node_path = []
-                        for i, link_id in enumerate(path_links):
-                            link = self.network.links[link_id]
-                            if i == 0:
-                                node_path.append(link.source_node)
-                            node_path.append(link.destination_node)
+                        #  Calculate node path correctly
+                        node_path = self._calculate_node_path(path_links)
                         
                         # Update connection
                         connection.allocated_path = node_path
@@ -445,6 +443,34 @@ class XT_NLI_A_RSA_Algorithm:
         
         self._record_computation_time(start_time)
         return allocated
+    
+    def _get_modulation_format_enum(self, modulation_format_name: str) -> ModulationFormat:
+        """Get ModulationFormat enum from string name"""
+        format_mapping = {
+            'PM-BPSK': ModulationFormat.PM_BPSK,
+            'PM-QPSK': ModulationFormat.PM_QPSK, 
+            'PM-8QAM': ModulationFormat.PM_8QAM,
+            'PM-16QAM': ModulationFormat.PM_16QAM,
+            'PM-32QAM': ModulationFormat.PM_32QAM,
+            'PM-64QAM': ModulationFormat.PM_64QAM,
+            'None': ModulationFormat.PM_BPSK  # Fallback
+        }
+        
+        return format_mapping.get(modulation_format_name, ModulationFormat.PM_BPSK)
+    
+    def _calculate_node_path(self, path_links: List[int]) -> List[int]:
+        """Calculate node path from link path"""
+        if not path_links:
+            return []
+        
+        node_path = []
+        for i, link_id in enumerate(path_links):
+            link = self.network.links[link_id]
+            if i == 0:
+                node_path.append(link.source_node)
+            node_path.append(link.destination_node)
+        
+        return node_path
     
     def _record_computation_time(self, start_time: float):
         """Record computation time for statistics"""
