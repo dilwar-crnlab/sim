@@ -20,10 +20,11 @@ if steps_dir not in sys.path:
 
 # Import existing step implementations
 try:
-    from step1 import SplitStepGroundTruthGenerator
-    from step_2_three_param import Step2_ParameterFitting
-    from step_3_ASE import Step3_AmplifierGains, AmplifierConfiguration
-    from step_4567 import Step4567_GSNRComputation
+    from steps.step1 import SplitStepGroundTruthGenerator
+    from steps.step_2_three_param import Step2_ParameterFitting
+    from steps.step_3_ASE import Step3_AmplifierGains, AmplifierConfiguration
+    from steps.step_4567 import Step4567_GSNRComputation
+
 except ImportError as e:
     print(f"Warning: Could not import step implementations: {e}")
     print("Please ensure the steps directory contains the required files")
