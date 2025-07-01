@@ -193,18 +193,10 @@ class ModifiedGSNRCalculator:
         }
     
     def run_modified_step1(self, path_links: List, target_channel: int,
-                          interfering_channels: List[Dict], launch_power_dbm: float = 0.0) -> Dict:
+                        interfering_channels: List[Dict], launch_power_dbm: float = 0.0) -> Dict:
         """
         Run modified Step 1 with actual path and interfering channels
-        
-        Args:
-            path_links: Actual network path links
-            target_channel: Target channel index
-            interfering_channels: List of interfering channels
-            launch_power_dbm: Launch power per channel
-            
-        Returns:
-            Step 1 results with realistic path and interference
+        FIXED: Properly handle multiple spans within links
         """
         
         # Create modified configuration for actual path
@@ -212,24 +204,43 @@ class ModifiedGSNRCalculator:
             path_links, target_channel, interfering_channels, launch_power_dbm
         )
         
-        # Modify the split-step generator to use actual path
+        # Modify the split-step generator to use actual path with proper spans
         original_spans = self.split_step_generator.spans
         
-        # Create spans from actual path links
+        # Create spans from actual path links - PROPERLY DIVIDE INTO SPANS
         modified_spans = []
-        for i, link in enumerate(path_links):
-            # Create span configuration for each link
-            span_config = type('SpanConfig', (), {
-                'span_id': i + 1,
-                'length_km': link.length_km,
-                'loss_coef_db_km': 0.21,  # Standard SSMF loss
-                'dispersion_ps_nm_km': 17.0,
-                'gamma_w_km': 1.3e-3,
-                'effective_area_um2': 80.0
-            })()
-            modified_spans.append(span_config)
+        span_id_counter = 1
         
-        # Temporarily replace spans with actual path
+        for link in path_links:
+            # Each link may have multiple spans
+            for i, span_length_km in enumerate(link.span_lengths_km):
+                # Create span configuration for each span within the link
+                span_config = type('SpanConfig', (), {
+                    'span_id': span_id_counter,
+                    'length_km': span_length_km,  # Use individual span length
+                    'loss_coef_db_km': 0.21,     # Standard SSMF loss
+                    'dispersion_ps_nm_km': 17.0,
+                    'gamma_w_km': 1.3e-3,
+                    'effective_area_um2': 80.0,
+                    'link_id': link.link_id,      # Track which link this span belongs to
+                    'span_in_link': i             # Track position within link
+                })()
+                modified_spans.append(span_config)
+                span_id_counter += 1
+        
+        # Calculate total path length for validation
+        total_calculated_length = sum(span.length_km for span in modified_spans)
+        expected_length = sum(link.length_km for link in path_links)
+        
+        if abs(total_calculated_length - expected_length) > 0.1:
+            print(f"Warning: Calculated span total {total_calculated_length:.1f} km "
+                f"doesn't match expected path length {expected_length:.1f} km")
+        
+        print(f"Path spans breakdown:")
+        for span in modified_spans:
+            print(f"  Span {span.span_id}: {span.length_km:.1f} km (Link {span.link_id})")
+        
+        # Temporarily replace spans with actual path spans
         self.split_step_generator.spans = modified_spans
         
         try:
@@ -238,9 +249,10 @@ class ModifiedGSNRCalculator:
             
             # Add system parameters and path information
             results['system_parameters'] = config['system_parameters']
-            results['span_length_km'] = config['span_length_km']
+            results['span_length_km'] = total_calculated_length  # Use total of all spans
             results['target_channel'] = target_channel
             results['interfering_channels'] = interfering_channels
+            results['num_spans_in_path'] = len(modified_spans)
             
             # Extract power evolution for target channel
             power_evolution_w = np.array(results['cumulative_evolution']['power_evolution_w'])

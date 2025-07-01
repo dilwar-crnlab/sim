@@ -110,6 +110,7 @@ class GSNRCalculator:
     def create_span_configuration_for_step1(self, path_links: List, total_launch_power_dbm: float = 0.0) -> Dict:
         """
         Create span configuration for Step 1 based on path links and MCF parameters
+        FIXED: Properly handle multiple spans within each link
         
         Args:
             path_links: List of link objects in the path
@@ -118,17 +119,25 @@ class GSNRCalculator:
         Returns:
             Configuration dictionary for Step 1 with MCF parameters
         """
-        # Calculate total path length
+        # Calculate total path length using proper span division
         total_length_km = sum(link.length_km for link in path_links)
+        total_spans = sum(link.num_spans for link in path_links)
+        
+        print(f"Creating span configuration:")
+        print(f"  Total path length: {total_length_km:.1f} km")
+        print(f"  Total spans in path: {total_spans}")
+        print(f"  Links breakdown:")
+        for link in path_links:
+            print(f"    Link {link.link_id}: {link.length_km:.1f} km → {link.num_spans} spans of {link.span_lengths_km} km")
         
         # Create input power configuration
         launch_power_per_channel_w = 10**(total_launch_power_dbm / 10) * 1e-3  # Convert dBm to W
         channel_powers_w = np.full(self.num_channels, launch_power_per_channel_w)
         
-        # ✅ Create MCF-specific scenario for Step 1
+        # ✅ Create MCF-specific scenario for Step 1 with proper span handling
         scenario = {
-            'name': f'mcf_4core_path_{total_length_km:.1f}km',
-            'description': f'4-core MCF path with {len(path_links)} links, total {total_length_km:.1f} km',
+            'name': f'mcf_4core_path_{total_length_km:.1f}km_{total_spans}spans',
+            'description': f'4-core MCF path with {len(path_links)} links, {total_spans} spans, total {total_length_km:.1f} km',
             'channel_powers_w': channel_powers_w,
             'transponder_channels': [0, 1],  # First two channels as transponders
             'ase_channels': list(range(2, self.num_channels)),
@@ -139,17 +148,48 @@ class GSNRCalculator:
                 'core_pitch_um': self.mcf_config.mcf_params.core_pitch_um,
                 'core_layout': self.mcf_config.mcf_params.core_layout,
                 'enable_icxt': True  # Enable ICXT calculation
-            }
+            },
+            # ✅ Add realistic span information
+            'path_spans': [
+                {
+                    'link_id': link.link_id,
+                    'link_length_km': link.length_km,
+                    'num_spans': link.num_spans,
+                    'span_lengths_km': link.span_lengths_km
+                }
+                for link in path_links
+            ]
         }
         
-        # ✅ Enhanced system parameters with MCF specifics
+        # ✅ Enhanced system parameters with proper span handling
         system_parameters = {
             'frequencies_hz': self.frequencies_hz,
             'wavelengths_nm': self.wavelengths_nm,
             'num_channels': self.num_channels,
             'alpha_db_km': [self.frequency_params['loss_coefficient_db_km'][freq] 
                         for freq in self.frequencies_hz],
-            'span_length_km': total_length_km,
+            'total_path_length_km': total_length_km,
+            'total_spans': total_spans,
+            'links_in_path': len(path_links),
+            # ✅ Individual span information for realistic amplification
+            'span_details': [
+                {
+                    'span_global_id': span_id,
+                    'link_id': link.link_id,
+                    'span_in_link': span_idx,
+                    'length_km': span_length,
+                    'cumulative_distance_km': sum(
+                        sum(path_links[j].span_lengths_km[:span_idx if j == link_idx else len(path_links[j].span_lengths_km)])
+                        for j in range(link_idx)
+                    ) + sum(link.span_lengths_km[:span_idx]) + span_length
+                }
+                for link_idx, link in enumerate(path_links)
+                for span_idx, (span_id, span_length) in enumerate(
+                    zip(range(sum(len(path_links[j].span_lengths_km) for j in range(link_idx)) + 1,
+                            sum(len(path_links[j].span_lengths_km) for j in range(link_idx + 1)) + 1),
+                        link.span_lengths_km), 1
+                )
+            ],
             'mcf_parameters': {
                 'num_cores': self.mcf_config.mcf_params.num_cores,
                 'core_pitch_um': self.mcf_config.mcf_params.core_pitch_um,
@@ -174,84 +214,8 @@ class GSNRCalculator:
         return {
             'scenario': scenario,
             'system_parameters': system_parameters,
-            'span_length_km': total_length_km
-        }
-    
-    def run_step1_power_evolution(self, path_links: List, launch_power_dbm: float = 0.0) -> Dict:
-        """
-        Run Step 1 power evolution calculation
-        
-        Args:
-            path_links: List of link objects
-            launch_power_dbm: Launch power per channel (dBm)
-            
-        Returns:
-            Step 1 results
-        """
-        try:
-            # Create split-step ground truth generator
-            generator = SplitStepGroundTruthGenerator()
-            
-            # Create configuration
-            config = self.create_span_configuration_for_step1(path_links, launch_power_dbm)
-            
-            # Run simulation for the scenario
-            results = generator.simulate_multi_span_system(config['scenario'])
-            
-            # Add system parameters
-            results['system_parameters'] = config['system_parameters']
-            results['span_length_km'] = config['span_length_km']
-            
-            # Extract final power evolution data
-            power_evolution_w = np.array(results['cumulative_evolution']['power_evolution_w'])
-            distances_m = np.array(results['cumulative_evolution']['distances_km']) * 1000  # Convert to meters
-            
-            results['power_evolution_w'] = power_evolution_w
-            results['distances_m'] = distances_m
-            results['initial_powers_w'] = power_evolution_w[0, :] if power_evolution_w.size > 0 else np.zeros(self.num_channels)
-            results['final_powers_w'] = power_evolution_w[-1, :] if power_evolution_w.size > 0 else np.zeros(self.num_channels)
-            
-            return results
-            
-        except Exception as e:
-            print(f"Error in Step 1: {e}")
-            # Return fallback results
-            return self._create_fallback_step1_results(path_links, launch_power_dbm)
-    
-    # ✅ Also update the fallback method to use proper MCF parameters
-    def _create_fallback_step1_results(self, path_links: List, launch_power_dbm: float) -> Dict:
-        """Create fallback Step 1 results with MCF parameters if import fails"""
-        total_length_km = sum(link.length_km for link in path_links)
-        launch_power_w = 10**(launch_power_dbm / 10) * 1e-3
-        
-        # Simple exponential decay model with ICXT consideration
-        final_powers_w = np.zeros(self.num_channels)
-        for i, freq_hz in enumerate(self.frequencies_hz):
-            loss_db_km = self.frequency_params['loss_coefficient_db_km'][freq_hz]
-            
-            # ✅ Add ICXT penalty for 4-core MCF (rough approximation)
-            icxt_penalty_db_km = 0.02  # 0.02 dB/km ICXT penalty for 4-core at 43μm pitch
-            total_loss_db_km = loss_db_km + icxt_penalty_db_km
-            
-            loss_linear = 10**(-total_loss_db_km * total_length_km / 10)
-            final_powers_w[i] = launch_power_w * loss_linear
-        
-        return {
-            'system_parameters': {
-                'frequencies_hz': self.frequencies_hz,
-                'wavelengths_nm': self.wavelengths_nm,
-                'num_channels': self.num_channels,
-                'alpha_db_km': [self.frequency_params['loss_coefficient_db_km'][freq] 
-                            for freq in self.frequencies_hz],
-                'mcf_parameters': self.mcf_config.mcf_params.__dict__
-            },
-            'span_length_km': total_length_km,
-            'power_evolution_w': np.array([np.full(self.num_channels, launch_power_w), final_powers_w]),
-            'distances_m': np.array([0, total_length_km * 1000]),
-            'initial_powers_w': np.full(self.num_channels, launch_power_w),
-            'final_powers_w': final_powers_w,
-            'fallback_mode': True,
-            'mcf_enabled': True
+            'span_length_km': total_length_km,  # Keep for backward compatibility
+            'total_spans': total_spans
         }
     
     def run_step2_parameter_fitting(self, step1_results: Dict) -> Dict:
