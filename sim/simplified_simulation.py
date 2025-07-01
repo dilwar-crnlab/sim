@@ -2,33 +2,67 @@
 # -*- coding: utf-8 -*-
 
 """
-Event-Driven Dynamic Simulator for MCF EON
-File: sim/dynamic_simulator.py
+Simplified Event-Driven Dynamic Simulator for MCF EON
+Processes exactly 100,000 connections with exponential arrival and holding times
 """
 
 import heapq
 import time
+import numpy as np
+import random
 from typing import Dict, Set
+
+# Import required modules
 from events import SimulationEvent, EventType
-from traffic_generator import DynamicTrafficGenerator
 from xt_nli_rsa import SpectrumAllocationMethod
+from network import NetworkTopology
+from config import MCF4CoreCLBandConfig
+from connection_manager import ConnectionManager, Connection
+from gsnr_calculator import GSNRCalculator
+from xt_nli_rsa import XT_NLI_A_RSA_Algorithm
 
 class SimplifiedDynamicSimulator:
     """
-    Event-driven simulator that processes exactly 100,000 connections
-    Focuses on blocking probability calculation with realistic dynamics
+    Simplified event-driven simulator for MCF EON
+    Uses exponential inter-arrival and holding times
     """
     
-    def __init__(self, mcf_simulator, traffic_generator: DynamicTrafficGenerator):
+    def __init__(self, network: NetworkTopology, mcf_config: MCF4CoreCLBandConfig, 
+                 mean_inter_arrival_time: float = 1.0, mean_holding_time: float = 25.0):
         """
-        Initialize event-driven simulator
+        Initialize simplified dynamic simulator
         
         Args:
-            mcf_simulator: Main MCFEONSimulator instance
-            traffic_generator: Traffic generator instance
+            network: Network topology
+            mcf_config: MCF configuration  
+            mean_inter_arrival_time: Mean time between arrivals
+            mean_holding_time: Mean service holding time
         """
-        self.mcf_sim = mcf_simulator
-        self.traffic_gen = traffic_generator
+        self.network = network
+        self.mcf_config = mcf_config
+        self.mean_service_inter_arrival_time = mean_inter_arrival_time
+        self.mean_service_holding_time = mean_holding_time
+        
+        # Initialize components
+        self.connection_manager = ConnectionManager()
+        
+        # Initialize GSNR calculator
+        band_config = {
+            'c_band': mcf_config.band_configs['C'].__dict__,
+            'l_band': mcf_config.band_configs['L'].__dict__
+        }
+        self.gsnr_calculator = GSNRCalculator(mcf_config, band_config)
+        
+        # Initialize RSA algorithm
+        self.rsa_algorithm = XT_NLI_A_RSA_Algorithm(network, mcf_config, self.gsnr_calculator)
+        
+        # Get core nodes for traffic generation
+        self.core_nodes = [node_id for node_id, node in self.network.nodes.items() 
+                          if node.add_drop_enabled]
+        
+        # Traffic demand characteristics
+        self.bandwidth_options = [100, 200, 300, 400, 500, 600]  # Gbps
+        self.bandwidth_probabilities = [0.3, 0.25, 0.2, 0.15, 0.07, 0.03]  # Favor lower BW
         
         # Event queue (priority queue)
         self.event_queue = []
@@ -46,31 +80,75 @@ class SimplifiedDynamicSimulator:
         # Active connections set
         self.active_connections: Set[str] = set()
         
-        print(f"Event-Driven Simulator initialized:")
+        # Calculate offered load in Erlangs (arrival_rate × holding_time)
+        arrival_rate = 1.0 / self.mean_service_inter_arrival_time
+        offered_load = arrival_rate * self.mean_service_holding_time
+        
+        print(f"Simplified Dynamic MCF EON Simulator initialized:")
         print(f"  Target connections: {self.total_connections_to_process:,}")
-        print(f"  Traffic arrival rate: {traffic_generator.arrival_rate_per_hour:.1f} req/hour")
-        print(f"  Expected offered load: {traffic_generator.estimate_offered_load():.1f} Erlangs")
+        print(f"  Mean inter-arrival time: {mean_inter_arrival_time:.2f}")
+        print(f"  Mean holding time: {mean_holding_time:.2f}")
+        print(f"  Offered load: {offered_load:.2f} Erlangs")
+        print(f"  MCF: {mcf_config.mcf_params.num_cores} cores, {len(mcf_config.channels)} channels")
+    
+    def generate_connection_request(self, arrival_time: float, request_id: int) -> Connection:
+        """
+        Generate a single connection request with exponential holding time
+        
+        Args:
+            arrival_time: Time when connection request arrives
+            request_id: Unique request identifier
+            
+        Returns:
+            Connection object with generated parameters
+        """
+        
+        # Random source and destination (must be different)
+        source, dest = np.random.choice(self.core_nodes, 2, replace=False)
+        
+        # Bandwidth demand with weighted random selection
+        bandwidth_gbps = np.random.choice(
+            self.bandwidth_options, 
+            p=self.bandwidth_probabilities
+        )
+        
+        # Exponential holding time: ht = expovariate(1 / mean_service_holding_time)
+        holding_time = random.expovariate(1.0 / self.mean_service_holding_time)
+        
+        # Create connection object
+        connection = Connection(
+            connection_id=str(request_id),
+            source_node=source,
+            destination_node=dest,
+            bandwidth_demand_gbps=bandwidth_gbps,
+            holding_time_hours=holding_time,  # Store as time units (not hours)
+            arrival_time=arrival_time,
+            priority=1,
+            service_type="best_effort"
+        )
+        
+        return connection
     
     def generate_all_arrival_events(self):
         """
-        Pre-generate all 100,000 arrival events with Poisson timing
-        This ensures exactly 100,000 connections are processed
+        Pre-generate all 100,000 arrival events with exponential inter-arrival times
         """
         
         print(f"Generating {self.total_connections_to_process:,} arrival events...")
         
-        current_time = 0.0
+        self.current_time = 0.0
         
         for request_id in range(self.total_connections_to_process):
-            # Generate next arrival time using Poisson process
-            current_time = self.traffic_gen.generate_next_arrival_time(current_time)
+            # Generate next arrival time: at = current_time + expovariate(1 / mean_inter_arrival_time)
+            inter_arrival_time = random.expovariate(1.0 / self.mean_service_inter_arrival_time)
+            self.current_time += inter_arrival_time
             
-            # Generate connection request
-            connection = self.traffic_gen.generate_connection_request(current_time, request_id)
+            # Generate connection request with exponential holding time
+            connection = self.generate_connection_request(self.current_time, request_id)
             
             # Create arrival event
             arrival_event = SimulationEvent(
-                event_time=current_time,
+                event_time=self.current_time,
                 event_type=EventType.CONNECTION_ARRIVAL,
                 connection_id=connection.connection_id,
                 connection_data={'connection': connection}
@@ -84,9 +162,9 @@ class SimplifiedDynamicSimulator:
                 print(f"  Generated {request_id + 1:,} events...")
         
         print(f"✅ All {self.total_connections_to_process:,} arrival events generated")
-        print(f"   Simulation time span: {current_time/3600:.1f} hours")
+        print(f"   Simulation time span: {self.current_time:.1f} time units")
         
-        return current_time / 3600.0  # Return simulation span in hours
+        return self.current_time  # Return simulation span in time units
     
     def process_arrival_event(self, event: SimulationEvent):
         """
@@ -100,10 +178,10 @@ class SimplifiedDynamicSimulator:
         self.connections_arrived += 1
         
         # Add to connection manager
-        self.mcf_sim.connection_manager.connections[connection.connection_id] = connection
+        self.connection_manager.connections[connection.connection_id] = connection
         
         # Calculate K-shortest paths
-        k_paths = self.mcf_sim.network.calculate_k_shortest_paths(
+        k_paths = self.network.calculate_k_shortest_paths(
             connection.source_node, 
             connection.destination_node, 
             k=3
@@ -112,7 +190,7 @@ class SimplifiedDynamicSimulator:
         success = False
         if k_paths:
             # Attempt to establish using XT-NLI-A-RSA algorithm
-            success = self.mcf_sim.rsa_algorithm.xt_nli_a_rsa_algorithm(
+            success = self.rsa_algorithm.xt_nli_a_rsa_algorithm(
                 connection, k_paths, sam=SpectrumAllocationMethod.BSC
             )
         
@@ -121,8 +199,8 @@ class SimplifiedDynamicSimulator:
             self.connections_established += 1
             self.active_connections.add(connection.connection_id)
             
-            # Schedule automatic teardown event
-            teardown_time = event.event_time + (connection.holding_time_hours * 3600.0)
+            # Schedule automatic teardown event (holding_time is already in time units)
+            teardown_time = event.event_time + connection.holding_time_hours
             teardown_event = SimulationEvent(
                 event_time=teardown_time,
                 event_type=EventType.CONNECTION_TEARDOWN,
@@ -133,7 +211,7 @@ class SimplifiedDynamicSimulator:
             # Update connection manager with allocation details
             path_length = self._calculate_path_length(k_paths[0])
             
-            self.mcf_sim.connection_manager.allocate_connection(
+            self.connection_manager.allocate_connection(
                 connection.connection_id,
                 k_paths[0],
                 connection.resource_allocations,
@@ -144,7 +222,7 @@ class SimplifiedDynamicSimulator:
         else:
             # Connection blocked due to insufficient resources
             self.connections_blocked += 1
-            self.mcf_sim.connection_manager.block_connection(
+            self.connection_manager.block_connection(
                 connection.connection_id, 
                 "Insufficient spectrum resources"
             )
@@ -161,10 +239,10 @@ class SimplifiedDynamicSimulator:
         
         if connection_id in self.active_connections:
             # Deallocate spectrum resources
-            self.mcf_sim.rsa_algorithm.deallocate_connection(connection_id)
+            self.rsa_algorithm.deallocate_connection(connection_id)
             
             # Update connection manager
-            self.mcf_sim.connection_manager.terminate_connection(connection_id)
+            self.connection_manager.terminate_connection(connection_id)
             
             # Update tracking
             self.active_connections.remove(connection_id)
@@ -175,7 +253,7 @@ class SimplifiedDynamicSimulator:
         total_length = 0.0
         
         for i in range(len(node_path) - 1):
-            link = self.mcf_sim.network.get_link_by_nodes(node_path[i], node_path[i+1])
+            link = self.network.get_link_by_nodes(node_path[i], node_path[i+1])
             if link:
                 total_length += link.length_km
         
@@ -190,20 +268,17 @@ class SimplifiedDynamicSimulator:
         """
         
         print(f"\n{'='*60}")
-        print(f"RUNNING EVENT-DRIVEN DYNAMIC SIMULATION")
+        print(f"RUNNING SIMPLIFIED DYNAMIC MCF EON SIMULATION")
         print(f"{'='*60}")
-        
-        # Validate traffic generator
-        if not self.traffic_gen.validate_configuration():
-            raise ValueError("Traffic generator configuration is invalid")
         
         start_time = time.time()
         
         # Generate all arrival events
-        simulation_span_hours = self.generate_all_arrival_events()
+        simulation_span_time_units = self.generate_all_arrival_events()
         
         print(f"\nProcessing events...")
         events_processed = 0
+        self.current_time = 0.0  # Reset current time for event processing
         
         # Main event processing loop
         while (self.event_queue and 
@@ -246,28 +321,24 @@ class SimplifiedDynamicSimulator:
         blocking_probability = self.connections_blocked / self.connections_arrived
         establishment_rate = self.connections_established / self.connections_arrived
         
+        # Calculate offered load
+        arrival_rate = 1.0 / self.mean_service_inter_arrival_time
+        offered_load = arrival_rate * self.mean_service_holding_time
+        
         # Compile comprehensive results
-        results = self._compile_results(
-            simulation_span_hours, wall_clock_time, events_processed, 
-            blocking_probability, establishment_rate, remaining_teardowns
-        )
-        
-        # Print final summary
-        self._print_simulation_summary(results)
-        
-        return results
-    
-    def _compile_results(self, simulation_span_hours, wall_clock_time, events_processed,
-                        blocking_probability, establishment_rate, remaining_teardowns) -> Dict:
-        """Compile comprehensive simulation results"""
-        
-        return {
-            'simulation_type': 'event_driven_dynamic',
+        results = {
+            'simulation_type': 'simplified_dynamic_mcf',
             'simulation_parameters': {
                 'total_connections_processed': self.connections_arrived,
-                'simulation_span_hours': simulation_span_hours,
+                'simulation_span_time_units': simulation_span_time_units,
                 'wall_clock_time_seconds': wall_clock_time,
-                'traffic_parameters': self.traffic_gen.get_traffic_statistics()
+                'mean_inter_arrival_time': self.mean_service_inter_arrival_time,
+                'mean_holding_time': self.mean_service_holding_time,
+                'offered_load_erlangs': offered_load,
+                'mcf_type': '4-core C+L band',
+                'num_cores': self.mcf_config.mcf_params.num_cores,
+                'core_pitch_um': self.mcf_config.mcf_params.core_pitch_um,
+                'total_channels': len(self.mcf_config.channels)
             },
             'connection_statistics': {
                 'connections_arrived': self.connections_arrived,
@@ -283,11 +354,22 @@ class SimplifiedDynamicSimulator:
                 'termination_rate': self.connections_terminated / max(self.connections_established, 1),
                 'events_processed_total': events_processed,
                 'events_per_second': events_processed / wall_clock_time,
-                'simulation_speedup': (simulation_span_hours * 3600) / wall_clock_time
+                'simulation_speedup': simulation_span_time_units / wall_clock_time
             },
-            'network_state': self.mcf_sim.rsa_algorithm.get_network_state_summary(),
-            'algorithm_statistics': self.mcf_sim.rsa_algorithm.get_algorithm_statistics()
+            'network_state': self.rsa_algorithm.get_network_state_summary(),
+            'algorithm_statistics': self.rsa_algorithm.get_algorithm_statistics(),
+            'mcf_specific_metrics': {
+                'spectrum_utilization_per_core': self.rsa_algorithm.spectrum_allocation.get_utilization_per_core(),
+                'icxt_aware_allocation': True,
+                'nli_aware_allocation': True,
+                'multi_band_operation': True
+            }
         }
+        
+        # Print simulation summary
+        self._print_simulation_summary(results)
+        
+        return results
     
     def _print_simulation_summary(self, results: Dict):
         """Print comprehensive simulation summary"""
@@ -296,22 +378,104 @@ class SimplifiedDynamicSimulator:
         conn_stats = results['connection_statistics']
         sim_params = results['simulation_parameters']
         
-        print(f"\n✅ Dynamic simulation completed successfully!")
-        print(f"{'='*50}")
-        print(f"Simulation Results:")
+        print(f"\n✅ Simplified MCF EON simulation completed!")
+        print(f"{'='*60}")
+        print(f"Simulation Parameters:")
+        print(f"  MCF Type: {sim_params['num_cores']}-core C+L band")
+        print(f"  Core Pitch: {sim_params['core_pitch_um']} μm")
+        print(f"  Total Channels: {sim_params['total_channels']}")
+        print(f"  Mean inter-arrival time: {sim_params['mean_inter_arrival_time']:.2f}")
+        print(f"  Mean holding time: {sim_params['mean_holding_time']:.2f}")
+        print(f"  Offered load: {sim_params['offered_load_erlangs']:.2f} Erlangs")
+        print(f"  Simulation span: {sim_params['simulation_span_time_units']:.1f} time units")
+        print(f"")
+        print(f"Connection Results:")
         print(f"  Connections processed: {conn_stats['connections_arrived']:,}")
         print(f"  Connections established: {conn_stats['connections_established']:,}")
         print(f"  Connections blocked: {conn_stats['connections_blocked']:,}")
         print(f"  Connections terminated: {conn_stats['connections_terminated']:,}")
         print(f"  Final active connections: {conn_stats['final_active_connections']}")
         print(f"")
-        print(f"Performance Metrics:")
-        print(f"  Blocking probability: {perf['blocking_probability']:.6f} ({perf['blocking_probability']*100:.4f}%)")
+        print(f"Key Performance Metrics:")
+        print(f"  🎯 Blocking probability: {perf['blocking_probability']:.6f} ({perf['blocking_probability']*100:.4f}%)")
         print(f"  Establishment rate: {perf['establishment_rate']:.6f}")
         print(f"  Events processed: {perf['events_processed_total']:,}")
         print(f"  Processing rate: {perf['events_per_second']:.0f} events/second")
         print(f"  Simulation speedup: {perf['simulation_speedup']:.0f}x real-time")
         print(f"")
-        print(f"Network Utilization:")
-        print(f"  Spectrum utilization: {results['network_state']['overall_utilization']:.4f}")
-        print(f"  Active connections at end: {results['network_state']['active_connections']}")
+        print(f"MCF Network Utilization:")
+        core_utils = results['mcf_specific_metrics']['spectrum_utilization_per_core']
+        for core_idx, utilization in core_utils.items():
+            print(f"  Core {core_idx}: {utilization:.4f} ({utilization*100:.2f}%)")
+        print(f"  Overall utilization: {results['network_state']['overall_utilization']:.4f}")
+        print(f"")
+        print(f"Algorithm Performance:")
+        alg_stats = results['algorithm_statistics']
+        print(f"  Success rate: {alg_stats['success_rate']:.3f}")
+        print(f"  Single-chunk allocations: {alg_stats['single_chunk_rate']:.3f}")
+        print(f"  Sliced allocations: {alg_stats['sliced_allocation_rate']:.3f}")
+        print(f"  Avg computation time: {alg_stats['average_computation_time_ms']:.2f} ms")
+
+def create_simplified_simulator(mean_inter_arrival_time: float = 1.0, 
+                               mean_holding_time: float = 25.0) -> SimplifiedDynamicSimulator:
+    """
+    Create a simplified dynamic simulator with MCF configuration
+    
+    Args:
+        mean_inter_arrival_time: Mean time between connection arrivals
+        mean_holding_time: Mean service holding time
+        
+    Returns:
+        Configured SimplifiedDynamicSimulator instance
+    """
+    
+    print("Setting up Simplified Dynamic MCF EON Simulator...")
+    
+    # Create MCF configuration
+    print("  Initializing 4-core C+L band MCF configuration...")
+    mcf_config = MCF4CoreCLBandConfig()
+    
+    # Create network topology
+    print("  Creating network topology...")
+    network = NetworkTopology()
+    network.create_us_backbone_network()
+    
+    # Create simulator
+    print("  Initializing simplified simulator...")
+    simulator = SimplifiedDynamicSimulator(network, mcf_config, 
+                                          mean_inter_arrival_time, mean_holding_time)
+    
+    print("✅ Simplified simulator ready!")
+    return simulator
+
+def main():
+    """Main function for simplified dynamic MCF EON simulation"""
+    
+    print("Simplified Dynamic MCF EON Simulator")
+    print("=" * 50)
+    print("Event-driven simulation with exponential inter-arrival and holding times")
+    print("Processes exactly 100,000 connections")
+    print("Uses: at = current_time + expovariate(1/mean_inter_arrival)")
+    print("      ht = expovariate(1/mean_holding_time)")
+    print("")
+    
+    # Get simulation parameters
+    try:
+        mean_inter_arrival = float(input("Enter mean inter-arrival time (default 1.0): ") or "1.0")
+        mean_holding = float(input("Enter mean holding time (default 25.0): ") or "25.0")
+    except ValueError:
+        print("Invalid input. Using defaults: inter-arrival=1.0, holding=25.0")
+        mean_inter_arrival = 1.0
+        mean_holding = 25.0
+    
+    # Create and run simulator
+    simulator = create_simplified_simulator(mean_inter_arrival, mean_holding)
+    results = simulator.run_simulation()
+    
+    print(f"\n🎉 Simplified MCF EON simulation completed!")
+    print(f"Blocking probability: {results['performance_metrics']['blocking_probability']:.6f}")
+    print(f"Results demonstrate ICXT and NLI aware spectrum allocation")
+    print(f"for 4-core C+L band Multi-Core Fiber EON")
+
+if __name__ == "__main__":
+    main()
