@@ -11,11 +11,12 @@ from typing import Dict, List
 import time
 
 # Import all fixed components
+# Import all fixed components
 from config import MCF4CoreCLBandConfig
 from network import NetworkTopology, Link, Node
 from connection_manager import ConnectionManager, Connection
 from gsnr_calculator import GSNRCalculator
-from xt_nli_rsa import XT_NLI_A_RSA_Algorithm, SpectrumAllocationMethod
+from XT_NLIA_RSA import UpdatedXT_NLI_A_RSA_Algorithm, SpectrumAllocationMethod
 
 
 
@@ -65,9 +66,7 @@ class MCFEONSimulator:
         
         #  Step 4: Initialize XT-NLI-A-RSA algorithm
         print("\n4. Initializing XT-NLI-A-RSA algorithm...")
-        self.rsa_algorithm = XT_NLI_A_RSA_Algorithm(
-            self.network, self.mcf_config, self.gsnr_calculator
-        )
+        self.rsa_algorithm = UpdatedXT_NLI_A_RSA_Algorithm(self.network, self.mcf_config, self.gsnr_calculator)
         
         #  Step 5: Initialize connection manager
         print("\n5. Initializing connection manager...")
@@ -241,7 +240,7 @@ class MCFEONSimulator:
             print(f"\n--- Testing {sam.value} ---")
             
             # Reset for fair comparison
-            self.rsa_algorithm = XT_NLI_A_RSA_Algorithm(
+            self.rsa_algorithm = UpdatedXT_NLI_A_RSA_Algorithm(
                 self.network, self.mcf_config, self.gsnr_calculator
             )
             self.connection_manager = ConnectionManager()

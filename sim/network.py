@@ -14,7 +14,7 @@ import json
 
 @dataclass
 class Link:
-    """Link between two nodes"""
+    """Link between two nodes with proper span division"""
     link_id: int
     source_node: int
     destination_node: int
@@ -24,10 +24,49 @@ class Link:
     fiber_type: str = "SSMF"
     
     def __post_init__(self):
+        """Automatically divide long links into realistic spans"""
         if not self.span_lengths_km:
-            # Default to equal spans
-            span_length = self.length_km / self.num_spans
-            self.span_lengths_km = [span_length] * self.num_spans
+            # Standard span length in real networks
+            standard_span_length = 80.0  # km
+            min_last_span_length = 20.0  # km (avoid very short spans)
+            
+            if self.length_km <= standard_span_length:
+                # Short link: single span
+                self.num_spans = 1
+                self.span_lengths_km = [self.length_km]
+            else:
+                # Long link: use standard spans + remainder
+                num_full_spans = int(self.length_km // standard_span_length)
+                remainder = self.length_km % standard_span_length
+                
+                if remainder < min_last_span_length and num_full_spans > 0:
+                    # If remainder is too short, distribute it to avoid very short spans
+                    # Reduce number of full spans by 1 and make last span longer
+                    num_full_spans -= 1
+                    last_span_length = standard_span_length + remainder
+                    
+                    self.span_lengths_km = [standard_span_length] * num_full_spans + [last_span_length]
+                    self.num_spans = num_full_spans + 1
+                else:
+                    # Normal case: standard spans + remainder
+                    self.span_lengths_km = [standard_span_length] * num_full_spans
+                    if remainder > 0:
+                        self.span_lengths_km.append(remainder)
+                        self.num_spans = num_full_spans + 1
+                    else:
+                        self.num_spans = num_full_spans
+        
+        # Validate spans
+        total_span_length = sum(self.span_lengths_km)
+        if abs(total_span_length - self.length_km) > 0.1:
+            print(f"Warning: Link {self.link_id} span total {total_span_length:.1f} km "
+                f"doesn't match link length {self.length_km:.1f} km")
+        
+        # Update num_spans to match actual spans
+        self.num_spans = len(self.span_lengths_km)
+        
+        print(f"Link {self.link_id}: {self.length_km:.1f} km → {self.num_spans} spans: "
+            f"{[f'{s:.1f}' for s in self.span_lengths_km]} km")
 
 @dataclass
 class Node:
